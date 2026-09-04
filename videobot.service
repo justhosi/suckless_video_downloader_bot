@@ -1,0 +1,23 @@
+[Unit]
+Description=Telegram Video Downloader Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=videobot
+Group=videobot
+WorkingDirectory=/opt/videobot
+EnvironmentFile=/opt/videobot/.env
+ExecStart=/opt/videobot/venv/bin/python /opt/videobot/bot.py
+Restart=on-failure
+RestartSec=5
+
+# Basic hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/videobot/downloads
+
+[Install]
+WantedBy=multi-user.target
