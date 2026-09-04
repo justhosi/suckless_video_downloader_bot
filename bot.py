@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -6,7 +7,9 @@ from pathlib import Path
 
 import yt_dlp
 from telegram import Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,9 +28,24 @@ URL_PATTERN = re.compile(
 )
 
 
+async def safe_call(coro_func, *args, retries=3, delay=3, **kwargs):
+    """Call a Telegram API coroutine, retrying on transient network errors."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return await coro_func(*args, **kwargs)
+        except (TimedOut, NetworkError) as e:
+            last_err = e
+            if attempt < retries:
+                logger.warning("Network hiccup (attempt %d/%d): %s", attempt + 1, retries, e)
+                await asyncio.sleep(delay)
+    raise last_err
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send me a YouTube, Instagram, or TikTok link and I'll send the video back."
+    await safe_call(
+        update.message.reply_text,
+        "Send me a YouTube, Instagram, or TikTok link and I'll send the video back.",
     )
 
 
@@ -35,11 +53,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     match = URL_PATTERN.search(text)
     if not match:
-        await update.message.reply_text("Send me a valid YouTube, Instagram, or TikTok link.")
+        await safe_call(update.message.reply_text, "Send me a valid YouTube, Instagram, or TikTok link.")
         return
 
     url = match.group(0)
-    status_msg = await update.message.reply_text("Downloading…")
+    status_msg = await safe_call(update.message.reply_text, "Downloading…")
 
     with tempfile.TemporaryDirectory(dir=DOWNLOAD_DIR) as tmpdir:
         outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
@@ -56,42 +74,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 info = ydl.extract_info(url, download=True)
                 filepath = ydl.prepare_filename(info)
         except yt_dlp.utils.DownloadError as e:
-            await status_msg.edit_text(f"Couldn't download that video: {e}")
+            await safe_call(status_msg.edit_text, f"Couldn't download that video: {e}")
             return
         except Exception:
             logger.exception("Unexpected error downloading %s", url)
-            await status_msg.edit_text("Something went wrong downloading that video.")
+            await safe_call(status_msg.edit_text, "Something went wrong downloading that video.")
             return
 
         if not os.path.exists(filepath):
-            await status_msg.edit_text(
-                f"Download failed, or the video is over the {MAX_FILESIZE_MB}MB limit."
+            await safe_call(
+                status_msg.edit_text,
+                f"Download failed, or the video is over the {MAX_FILESIZE_MB}MB limit.",
             )
             return
 
         filesize_mb = os.path.getsize(filepath) // (1024 * 1024)
         if filesize_mb > MAX_FILESIZE_MB:
-            await status_msg.edit_text(
-                f"Video is {filesize_mb}MB, over the {MAX_FILESIZE_MB}MB Telegram bot limit."
+            await safe_call(
+                status_msg.edit_text,
+                f"Video is {filesize_mb}MB, over the {MAX_FILESIZE_MB}MB Telegram bot limit.",
             )
             return
 
-        await status_msg.edit_text("Uploading…")
+        await safe_call(status_msg.edit_text, "Uploading…")
         try:
             with open(filepath, "rb") as f:
-                await update.message.reply_video(video=f, caption=info.get("title", "")[:1024])
-            await status_msg.delete()
+                await safe_call(
+                    update.message.reply_video, video=f, caption=info.get("title", "")[:1024]
+                )
+            await safe_call(status_msg.delete)
         except Exception:
             logger.exception("Error sending video for %s", url)
-            await status_msg.edit_text("Downloaded it, but couldn't send it back.")
+            await safe_call(status_msg.edit_text, "Downloaded it, but couldn't send it back.")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Update %s caused error: %s", update, context.error)
 
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
-    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Longer timeouts so brief network hiccups don't kill requests outright
+    request = HTTPXRequest(connect_timeout=20, read_timeout=20, write_timeout=20, pool_timeout=20)
+    get_updates_request = HTTPXRequest(
+        connect_timeout=20, read_timeout=40, write_timeout=20, pool_timeout=20
+    )
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
     logger.info("Bot starting…")
     app.run_polling()
 
