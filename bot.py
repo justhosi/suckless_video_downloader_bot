@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import yt_dlp
 from telegram import Update
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
@@ -17,6 +17,10 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+# HTTPX includes the complete request URL in INFO logs. Telegram's API token is
+# part of that URL, so keep transport logging out of the journal.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MAX_FILESIZE_MB = int(os.environ.get("MAX_FILESIZE_MB", "50"))
@@ -56,6 +60,8 @@ async def safe_call(coro_func, *args, retries=6, delay=3, **kwargs):
         try:
             return await coro_func(*args, **kwargs)
         except (TimedOut, NetworkError) as e:
+            if isinstance(e, BadRequest):
+                raise
             last_err = e
             if attempt < retries:
                 logger.warning("Network hiccup (attempt %d/%d): %s", attempt + 1, retries, e)
@@ -124,10 +130,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_jobs += 1
     status_msg = None
     try:
-        queue_message = "Downloading…" if pending_jobs <= MAX_CONCURRENT_DOWNLOADS else "Queued…"
-        status_msg = await safe_call(message.reply_text, queue_message)
+        was_queued = pending_jobs > MAX_CONCURRENT_DOWNLOADS
+        status_msg = await safe_call(message.reply_text, "Queued…" if was_queued else "Downloading…")
         async with download_slots:
-            await safe_call(status_msg.edit_text, "Downloading…")
+            if was_queued:
+                await safe_call(status_msg.edit_text, "Downloading…")
             with tempfile.TemporaryDirectory(dir=DOWNLOAD_DIR) as tmpdir:
                 try:
                     filepath, title = await asyncio.to_thread(download_video, url, Path(tmpdir))
