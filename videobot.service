@@ -9,6 +9,7 @@ User=videobot
 Group=videobot
 WorkingDirectory=/opt/videobot
 EnvironmentFile=/opt/videobot/.env
+UMask=0077
 ExecStart=/opt/videobot/venv/bin/python /opt/videobot/bot.py
 Restart=on-failure
 RestartSec=5
@@ -16,6 +17,8 @@ RestartSec=5
 # Basic hardening
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/opt/videobot/downloads
 
