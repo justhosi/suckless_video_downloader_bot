@@ -29,6 +29,7 @@ MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", "2"))
 MAX_QUEUED_JOBS = int(os.environ.get("MAX_QUEUED_JOBS", "4"))
 USER_COOLDOWN_SECONDS = int(os.environ.get("USER_COOLDOWN_SECONDS", "30"))
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID")
+COOKIES_FILE = Path(os.environ.get("COOKIES_FILE", "/opt/videobot/cookies.txt"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 download_slots = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -81,10 +82,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID or str(user_id) != ADMIN_USER_ID:
         return
     active_jobs = min(pending_jobs, MAX_CONCURRENT_DOWNLOADS)
+    cookies_state = "present" if COOKIES_FILE.is_file() else "missing"
     await safe_call(
         update.message.reply_text,
         f"Running. Jobs: {pending_jobs} pending, {active_jobs} active. "
-        f"Capacity: {MAX_CONCURRENT_DOWNLOADS} active, {MAX_QUEUED_JOBS} queued.",
+        f"Capacity: {MAX_CONCURRENT_DOWNLOADS} active, {MAX_QUEUED_JOBS} queued. "
+        f"Cookies: {cookies_state}.",
     )
 
 
@@ -99,7 +102,10 @@ def download_video(url: str, directory: Path) -> tuple[Path, str]:
         "max_filesize": MAX_FILESIZE_MB * 1024 * 1024,
         "socket_timeout": 30,
         "retries": 3,
+        "cachedir": False,
     }
+    if COOKIES_FILE.is_file():
+        ydl_opts["cookiefile"] = str(COOKIES_FILE)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         return Path(ydl.prepare_filename(info)), info.get("title", "")
@@ -138,9 +144,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with tempfile.TemporaryDirectory(dir=DOWNLOAD_DIR) as tmpdir:
                 try:
                     filepath, title = await asyncio.to_thread(download_video, url, Path(tmpdir))
-                except yt_dlp.utils.DownloadError:
-                    logger.info("Download failed for user=%s host=%s", user_id, urlsplit(url).hostname)
-                    await safe_call(status_msg.edit_text, "I couldn't download that video. It may be private or unsupported.")
+                except yt_dlp.utils.DownloadError as e:
+                    err_text = str(e).lower()
+                    if "age" in err_text or "login" in err_text or "not available to everyone" in err_text:
+                        user_msg = "That video is age-restricted or login-gated. I can't download it."
+                    elif "private" in err_text:
+                        user_msg = "That video is private, so I can't download it."
+                    else:
+                        user_msg = "I couldn't download that video. It may be private or unsupported."
+                    logger.info("Download failed for user=%s host=%s err=%s", user_id, urlsplit(url).hostname, e)
+                    await safe_call(status_msg.edit_text, user_msg)
                     return
                 except Exception:
                     logger.exception("Unexpected download error for user=%s host=%s", user_id, urlsplit(url).hostname)
