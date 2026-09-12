@@ -48,13 +48,13 @@ def extract_supported_url(text: str) -> str | None:
             continue
         if any(
             hostname == domain or hostname.endswith(f".{domain}")
-            for domain in ("youtube.com", "youtu.be", "instagram.com", "tiktok.com")
+            for domain in ("youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com")
         ):
             return candidate
     return None
 
 
-async def safe_call(coro_func, *args, retries=6, delay=3, **kwargs):
+async def safe_call(coro_func, *args, retries=2, delay=1, **kwargs):
     """Call a Telegram API coroutine, retrying on transient network errors."""
     last_err = None
     for attempt in range(retries + 1):
